@@ -448,26 +448,68 @@ static aks_result_t aks_telemetry_hardware_init(void)
  */
 static aks_result_t aks_telemetry_collect_vehicle_data(void)
 {
-    /* Read vehicle speed */
-    g_telemetry_handle.vehicle_data.vehicle_speed = 0.0f; // From speed sensor
+    /* Read vehicle speed from wheel speed sensors */
+    float wheel_speeds[4];
+    wheel_speeds[0] = aks_sensor_read_wheel_speed(AKS_WHEEL_FRONT_LEFT);
+    wheel_speeds[1] = aks_sensor_read_wheel_speed(AKS_WHEEL_FRONT_RIGHT);
+    wheel_speeds[2] = aks_sensor_read_wheel_speed(AKS_WHEEL_REAR_LEFT);
+    wheel_speeds[3] = aks_sensor_read_wheel_speed(AKS_WHEEL_REAR_RIGHT);
     
-    /* Read motor data */
-    g_telemetry_handle.vehicle_data.motor_torque = 0.0f;      // From motor controller
-    g_telemetry_handle.vehicle_data.motor_speed = 0.0f;      // From motor controller
-    g_telemetry_handle.vehicle_data.motor_temperature = 25.0f; // From temperature sensor
+    /* Calculate average vehicle speed */
+    g_telemetry_handle.vehicle_data.vehicle_speed = (wheel_speeds[0] + wheel_speeds[1] + 
+                                                    wheel_speeds[2] + wheel_speeds[3]) / 4.0f;
     
-    /* Read battery data */
-    g_telemetry_handle.vehicle_data.battery_voltage = aks_voltage_read(AKS_VOLTAGE_SENSOR_BATTERY_PACK);
-    g_telemetry_handle.vehicle_data.battery_current = aks_current_read(AKS_CURRENT_SENSOR_BATTERY);
-    g_telemetry_handle.vehicle_data.battery_temperature = aks_temperature_read(AKS_TEMP_SENSOR_BATTERY);
-    g_telemetry_handle.vehicle_data.battery_soc = 85.0f;     // From BMS
+    /* Read motor data from CAN bus */
+    aks_can_frame_t motor_frame;
+    if (aks_can_receive(&motor_frame, 10) == AKS_OK && motor_frame.id == 0x123) {
+        /* Motor controller data frame */
+        g_telemetry_handle.vehicle_data.motor_torque = 
+            ((float)((motor_frame.data[0] << 8) | motor_frame.data[1]) - 32768.0f) / 100.0f;
+        g_telemetry_handle.vehicle_data.motor_speed = 
+            (float)((motor_frame.data[2] << 8) | motor_frame.data[3]);
+        g_telemetry_handle.vehicle_data.motor_temperature = 
+            (float)motor_frame.data[4] - 40.0f; /* Temperature offset */
+    } else {
+        /* Fallback to direct sensor reading */
+        g_telemetry_handle.vehicle_data.motor_torque = aks_sensor_read_motor_torque();
+        g_telemetry_handle.vehicle_data.motor_speed = aks_sensor_read_motor_speed();
+        g_telemetry_handle.vehicle_data.motor_temperature = aks_temperature_read(AKS_TEMP_SENSOR_MOTOR);
+    }
     
-    /* Read safety data */
-    g_telemetry_handle.vehicle_data.isolation_resistance = 500000.0f; // From isolation monitor
+    /* Read battery data from BMS */
+    aks_bms_status_t bms_status;
+    if (aks_bms_get_status(&bms_status) == AKS_OK) {
+        g_telemetry_handle.vehicle_data.battery_voltage = bms_status.pack_voltage;
+        g_telemetry_handle.vehicle_data.battery_current = bms_status.pack_current;
+        g_telemetry_handle.vehicle_data.battery_temperature = bms_status.pack_temperature;
+        g_telemetry_handle.vehicle_data.battery_soc = bms_status.soc;
+    } else {
+        /* Fallback to direct sensor reading */
+        g_telemetry_handle.vehicle_data.battery_voltage = aks_voltage_read(AKS_VOLTAGE_SENSOR_BATTERY_PACK);
+        g_telemetry_handle.vehicle_data.battery_current = aks_current_read(AKS_CURRENT_SENSOR_BATTERY);
+        g_telemetry_handle.vehicle_data.battery_temperature = aks_temperature_read(AKS_TEMP_SENSOR_BATTERY);
+        g_telemetry_handle.vehicle_data.battery_soc = aks_battery_calculate_soc();
+    }
     
-    /* Read system state */
-    g_telemetry_handle.vehicle_data.system_state = 1; // Normal operation
-    g_telemetry_handle.vehicle_data.fault_codes = 0;  // No faults
+    /* Read safety data from isolation monitor */
+    float isolation_resistance;
+    if (aks_isolation_get_resistance(&isolation_resistance) == AKS_OK) {
+        g_telemetry_handle.vehicle_data.isolation_resistance = isolation_resistance;
+    } else {
+        g_telemetry_handle.vehicle_data.isolation_resistance = 0.0f; /* Unknown */
+    }
+    
+    /* Read system state from core module */
+    aks_state_t system_state = aks_core_get_state();
+    g_telemetry_handle.vehicle_data.system_state = (uint8_t)system_state;
+    
+    /* Read active fault codes from safety module */
+    aks_fault_status_t fault_status;
+    if (aks_safety_get_fault_status(&fault_status) == AKS_OK) {
+        g_telemetry_handle.vehicle_data.fault_codes = fault_status.active_faults;
+    } else {
+        g_telemetry_handle.vehicle_data.fault_codes = 0;
+    }
     
     /* Set timestamp */
     g_telemetry_handle.vehicle_data.timestamp = aks_core_get_tick();
