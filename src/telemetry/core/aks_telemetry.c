@@ -617,10 +617,63 @@ static aks_result_t aks_telemetry_create_packet(aks_telemetry_packet_t* packet)
  */
 static aks_result_t aks_telemetry_send_lora(const uint8_t* data, uint16_t length)
 {
-    /* Send data via LoRa module */
-    /* This would interface with the actual LoRa driver */
+    if (!g_telemetry_handle.lora_available || data == NULL || length == 0) {
+        return AKS_ERROR_INVALID_PARAM;
+    }
     
-    return AKS_OK;
+    /* Check if LoRa module is ready */
+    if (!aks_lora_is_ready()) {
+        aks_logger_warning("LoRa module not ready for transmission");
+        return AKS_ERROR_NOT_READY;
+    }
+    
+    /* Switch antenna to LoRa if RF switch is available */
+    if (g_telemetry_handle.wifi_available) {
+        aks_gpio_write(AKS_GPIO_RF_SWITCH_LORA, true);
+        aks_gpio_write(AKS_GPIO_RF_SWITCH_WIFI, false);
+        aks_delay_ms(10); /* Allow antenna switch settling time */
+    }
+    
+    /* Prepare LoRa packet with header */
+    uint8_t lora_packet[256];
+    uint16_t packet_index = 0;
+    
+    /* Add packet header */
+    lora_packet[packet_index++] = 0xAA; /* Sync byte 1 */
+    lora_packet[packet_index++] = 0x55; /* Sync byte 2 */
+    lora_packet[packet_index++] = (uint8_t)(length >> 8); /* Length high byte */
+    lora_packet[packet_index++] = (uint8_t)(length & 0xFF); /* Length low byte */
+    
+    /* Add device ID */
+    memcpy(&lora_packet[packet_index], g_telemetry_handle.config.device_id, 8);
+    packet_index += 8;
+    
+    /* Add payload */
+    if (packet_index + length <= sizeof(lora_packet)) {
+        memcpy(&lora_packet[packet_index], data, length);
+        packet_index += length;
+        
+        /* Add CRC */
+        uint16_t crc = aks_crc16_calculate(lora_packet, packet_index);
+        lora_packet[packet_index++] = (uint8_t)(crc >> 8);
+        lora_packet[packet_index++] = (uint8_t)(crc & 0xFF);
+        
+        /* Send packet via LoRa */
+        aks_result_t result = aks_lora_transmit(lora_packet, packet_index, 5000); /* 5 second timeout */
+        
+        if (result == AKS_OK) {
+            g_telemetry_handle.packets_sent++;
+            aks_logger_debug("LoRa packet sent successfully (%d bytes)", packet_index);
+        } else {
+            g_telemetry_handle.packets_failed++;
+            aks_logger_error("LoRa transmission failed: %d", result);
+        }
+        
+        return result;
+    } else {
+        aks_logger_error("LoRa packet too large: %d bytes", packet_index + length);
+        return AKS_ERROR_OVERFLOW;
+    }
 }
 
 /**
