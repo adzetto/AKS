@@ -410,10 +410,125 @@ aks_result_t aks_charger_emergency_stop(void)
  */
 static aks_result_t aks_charger_hardware_init(void)
 {
-    /* Initialize PWM for power control */
-    /* Initialize ADC for voltage/current measurement */
-    /* Initialize GPIO for contactors */
-    /* Initialize AC input monitoring */
+    aks_result_t result = AKS_OK;
+    
+    /* Initialize PWM for power control (switching frequency ~100kHz) */
+    aks_pwm_config_t pwm_config = {
+        .frequency = 100000,            /* 100 kHz switching frequency */
+        .duty_cycle = 0.0f,             /* Start with 0% duty cycle */
+        .polarity = AKS_PWM_POLARITY_HIGH, /* Active high */
+        .dead_time_ns = 100,            /* 100ns dead time for safety */
+        .enable_complementary = true    /* Enable complementary output */
+    };
+    
+    result = aks_pwm_init(AKS_PWM_CHARGER_PRIMARY, &pwm_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize charger primary PWM: %d", result);
+        return result;
+    }
+    
+    result = aks_pwm_init(AKS_PWM_CHARGER_SECONDARY, &pwm_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize charger secondary PWM: %d", result);
+        return result;
+    }
+    
+    /* Initialize ADC channels for measurements */
+    aks_adc_channel_config_t adc_channels[] = {
+        {AKS_ADC_CH_CHARGER_AC_VOLTAGE, AKS_ADC_SAMPLING_TIME_15_CYCLES, true},
+        {AKS_ADC_CH_CHARGER_AC_CURRENT, AKS_ADC_SAMPLING_TIME_15_CYCLES, true},
+        {AKS_ADC_CH_CHARGER_DC_VOLTAGE, AKS_ADC_SAMPLING_TIME_15_CYCLES, true},
+        {AKS_ADC_CH_CHARGER_DC_CURRENT, AKS_ADC_SAMPLING_TIME_15_CYCLES, true},
+        {AKS_ADC_CH_CHARGER_TEMPERATURE, AKS_ADC_SAMPLING_TIME_480_CYCLES, false}
+    };
+    
+    for (uint8_t i = 0; i < 5; i++) {
+        result = aks_adc_configure_channel(&adc_channels[i]);
+        if (result != AKS_OK) {
+            aks_logger_error("Failed to configure ADC channel %d: %d", adc_channels[i].channel, result);
+            return result;
+        }
+    }
+    
+    /* Initialize GPIO for contactors and control signals */
+    aks_gpio_config_t gpio_config = {
+        .mode = AKS_GPIO_MODE_OUTPUT_PP,
+        .pull = AKS_GPIO_PULL_NONE,
+        .speed = AKS_GPIO_SPEED_LOW
+    };
+    
+    /* Main charger contactors */
+    result = aks_gpio_init(AKS_GPIO_CHARGER_MAIN_CONTACTOR, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_CHARGER_PRECHARGE_CONTACTOR, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* AC input monitoring and control */
+    result = aks_gpio_init(AKS_GPIO_CHARGER_AC_ENABLE, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_CHARGER_FAN_CONTROL, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Configure AC input monitoring GPIOs as inputs */
+    gpio_config.mode = AKS_GPIO_MODE_INPUT;
+    gpio_config.pull = AKS_GPIO_PULL_UP;
+    
+    result = aks_gpio_init(AKS_GPIO_CHARGER_AC_DETECT, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_CHARGER_FAULT_INPUT, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Initialize all outputs to safe state */
+    aks_gpio_write(AKS_GPIO_CHARGER_MAIN_CONTACTOR, false);     /* Open main contactor */
+    aks_gpio_write(AKS_GPIO_CHARGER_PRECHARGE_CONTACTOR, false); /* Open precharge */
+    aks_gpio_write(AKS_GPIO_CHARGER_AC_ENABLE, false);          /* Disable AC input */
+    aks_gpio_write(AKS_GPIO_CHARGER_FAN_CONTROL, false);        /* Fan off */
+    
+    /* Initialize timer for control loop */
+    aks_timer_config_t timer_config = {
+        .period_us = 10000,             /* 10ms control period (100Hz) */
+        .auto_reload = true,
+        .enable_interrupt = true
+    };
+    
+    result = aks_timer_init(AKS_TIMER_CHARGER_CONTROL, &timer_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize charger control timer: %d", result);
+        return result;
+    }
+    
+    /* Initialize isolation monitoring for charger safety */
+    result = aks_gpio_init(AKS_GPIO_CHARGER_ISOLATION_CHECK, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Configure emergency stop input */
+    gpio_config.pull = AKS_GPIO_PULL_UP;
+    result = aks_gpio_init(AKS_GPIO_CHARGER_EMERGENCY_STOP, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Enable interrupt for emergency stop */
+    result = aks_gpio_configure_interrupt(AKS_GPIO_CHARGER_EMERGENCY_STOP, 
+                                         AKS_GPIO_INTERRUPT_FALLING_EDGE,
+                                         aks_charger_emergency_stop);
+    if (result != AKS_OK) {
+        aks_logger_warning("Failed to configure emergency stop interrupt: %d", result);
+    }
+    
+    /* Initialize status LEDs */
+    result = aks_gpio_init(AKS_GPIO_CHARGER_STATUS_LED_GREEN, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_CHARGER_STATUS_LED_RED, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Start with red LED on (not charging) */
+    aks_gpio_write(AKS_GPIO_CHARGER_STATUS_LED_GREEN, false);
+    aks_gpio_write(AKS_GPIO_CHARGER_STATUS_LED_RED, true);
+    
+    aks_logger_info("Charger hardware initialized successfully");
     
     return AKS_OK;
 }
