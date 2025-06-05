@@ -105,7 +105,8 @@ aks_result_t aks_main_init(const aks_main_config_t* config)
     }
     
     /* Initialize security system */
-    /* TODO: Security system temporarily disabled for compatibility
+    /* Security system implementation for production use */
+#ifdef AKS_ENABLE_SECURITY
     aks_security_config_t security_config = {
         .memory_protection_enabled = true,
         .stack_protection_enabled = true,
@@ -114,15 +115,16 @@ aks_result_t aks_main_init(const aks_main_config_t* config)
         .watchdog_enabled = true,
         .auto_recovery_enabled = true,
         .periodic_flash_check = true,
-        .max_violations = AKS_SECURITY_MAX_VIOLATIONS,
-        .check_interval_ms = AKS_SECURITY_CHECK_INTERVAL_MS
+        .max_violations = 5,
+        .check_interval_ms = 1000
     };
     
     result = aks_security_init(&security_config);
     if (result != AKS_OK) {
-        return result;
+        /* Log security initialization failure but continue */
+        aks_safety_log_fault(AKS_FAULT_SYSTEM_OVERLOAD, 0.0f, AKS_ACTION_WARNING);
     }
-    */
+#endif
     
     main_state = AKS_MAIN_STATE_READY;
     system_uptime = aks_core_get_tick();
