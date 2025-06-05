@@ -681,10 +681,106 @@ static aks_result_t aks_telemetry_send_lora(const uint8_t* data, uint16_t length
  */
 static aks_result_t aks_telemetry_send_wifi(const uint8_t* data, uint16_t length)
 {
-    /* Send data via WiFi module */
-    /* This would interface with the actual WiFi driver */
+    if (!g_telemetry_handle.wifi_available || data == NULL || length == 0) {
+        return AKS_ERROR_INVALID_PARAM;
+    }
     
-    return AKS_OK;
+    /* Check if WiFi module is connected */
+    if (!aks_wifi_is_connected()) {
+        aks_logger_warning("WiFi not connected for transmission");
+        return AKS_ERROR_NOT_READY;
+    }
+    
+    /* Switch antenna to WiFi if RF switch is available */
+    if (g_telemetry_handle.lora_available) {
+        aks_gpio_write(AKS_GPIO_RF_SWITCH_LORA, false);
+        aks_gpio_write(AKS_GPIO_RF_SWITCH_WIFI, true);
+        aks_delay_ms(10); /* Allow antenna switch settling time */
+    }
+    
+    /* Prepare HTTP POST request */
+    char http_header[512];
+    char content_length_str[16];
+    
+    /* Convert binary data to base64 for HTTP transmission */
+    char base64_data[512];
+    uint16_t base64_length = aks_base64_encode(data, length, base64_data, sizeof(base64_data));
+    
+    if (base64_length == 0) {
+        aks_logger_error("Failed to encode telemetry data to base64");
+        return AKS_ERROR;
+    }
+    
+    /* Create JSON payload */
+    char json_payload[768];
+    snprintf(json_payload, sizeof(json_payload),
+             "{"
+             "\"device_id\":\"%s\","
+             "\"timestamp\":%lu,"
+             "\"data\":\"%s\","
+             "\"length\":%d"
+             "}",
+             g_telemetry_handle.config.device_id,
+             aks_core_get_tick(),
+             base64_data,
+             length);
+    
+    uint16_t payload_length = strlen(json_payload);
+    snprintf(content_length_str, sizeof(content_length_str), "%d", payload_length);
+    
+    /* Build HTTP header */
+    snprintf(http_header, sizeof(http_header),
+             "POST /api/telemetry HTTP/1.1\r\n"
+             "Host: %s:%d\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %s\r\n"
+             "User-Agent: AKS-Telemetry/1.0\r\n"
+             "Connection: close\r\n"
+             "\r\n",
+             "telemetry.aks.local", /* Extract from server_url */
+             g_telemetry_handle.config.server_port,
+             content_length_str);
+    
+    /* Send HTTP request */
+    aks_result_t result = AKS_OK;
+    
+    /* Send header */
+    result = aks_wifi_send_data((uint8_t*)http_header, strlen(http_header), 5000);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to send HTTP header: %d", result);
+        g_telemetry_handle.packets_failed++;
+        return result;
+    }
+    
+    /* Send payload */
+    result = aks_wifi_send_data((uint8_t*)json_payload, payload_length, 5000);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to send HTTP payload: %d", result);
+        g_telemetry_handle.packets_failed++;
+        return result;
+    }
+    
+    /* Wait for response */
+    uint8_t response_buffer[256];
+    uint16_t response_length;
+    result = aks_wifi_receive_data(response_buffer, sizeof(response_buffer), &response_length, 10000);
+    
+    if (result == AKS_OK) {
+        /* Check HTTP response code */
+        if (strstr((char*)response_buffer, "200 OK") != NULL) {
+            g_telemetry_handle.packets_sent++;
+            aks_logger_debug("WiFi telemetry sent successfully (%d bytes)", length);
+        } else {
+            g_telemetry_handle.packets_failed++;
+            aks_logger_warning("HTTP server returned error response");
+            result = AKS_ERROR;
+        }
+    } else {
+        g_telemetry_handle.packets_failed++;
+        aks_logger_error("Failed to receive HTTP response: %d", result);
+    }
+    
+    return result;
 }
 
 /**
