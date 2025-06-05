@@ -515,8 +515,25 @@ static void aks_battery_update_modules(void)
             module->thermal_protection = false;
         }
         
-        /* Get module current (simulated) */
-        module->module_current = g_battery_pack.pack_current / AKS_BATTERY_MAX_MODULES;
+        /* Get module current from Hall effect sensor */
+        uint16_t current_raw;
+        float current_voltage;
+        uint8_t current_channel = AKS_ADC_CH_BATTERY_CURRENT_BASE + m;
+        
+        if (aks_adc_read_channel(current_channel, &current_raw, &current_voltage) == AKS_OK) {
+            /* Convert Hall sensor voltage to current */
+            /* Assuming ACS712-30A: 2.5V=0A, 66mV/A sensitivity */
+            float voltage_offset = current_voltage - 2.5f;
+            module->module_current = voltage_offset / 0.066f; /* Convert to amperes */
+            
+            /* Apply noise filtering */
+            if (fabsf(module->module_current) < 0.1f) {
+                module->module_current = 0.0f; /* Deadband for noise */
+            }
+        } else {
+            /* Sensor fault - estimate from pack current */
+            module->module_current = g_battery_pack.pack_current / AKS_BATTERY_MAX_MODULES;
+        }
     }
 }
 
