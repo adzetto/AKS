@@ -447,8 +447,45 @@ static aks_result_t aks_bms_read_temperatures(void)
         float total_temp = 0.0f;
         
         for (uint8_t cell = 0; cell < g_bms_handle.config.cells_per_module; cell++) {
-            /* Simulate temperature reading */
-            g_bms_handle.modules[module].cells[cell].temperature = 25.0f + (float)(rand() % 20 - 10);
+            /* Read temperature from dedicated NTC thermistor */
+            uint16_t raw_temp;
+            float temp_voltage;
+            uint8_t temp_channel = AKS_ADC_CH_BMS_TEMP_BASE + (module * g_bms_handle.config.cells_per_module + cell);
+            
+            if (aks_adc_read_channel(temp_channel, &raw_temp, &temp_voltage) == AKS_OK) {
+                /* Convert NTC thermistor voltage to temperature */
+                /* Using Steinhart-Hart equation for 10kΩ NTC (β=3950K) */
+                if (temp_voltage > 0.1f && temp_voltage < 3.2f) {
+                    float resistance = (temp_voltage * 10000.0f) / (3.3f - temp_voltage);
+                    
+                    /* Steinhart-Hart coefficients for 10kΩ NTC */
+                    float ln_r = logf(resistance / 10000.0f); /* R0 = 10kΩ at 25°C */
+                    float temp_kelvin = 1.0f / ((1.0f / 298.15f) + (ln_r / 3950.0f));
+                    float temperature = temp_kelvin - 273.15f; /* Convert to Celsius */
+                    
+                    /* Apply temperature filter */
+                    float temp_alpha = 0.8f;
+                    g_bms_handle.modules[module].cells[cell].temperature = 
+                        temp_alpha * g_bms_handle.modules[module].cells[cell].temperature +
+                        (1.0f - temp_alpha) * temperature;
+                    
+                    /* Validate temperature range */
+                    if (temperature < -40.0f || temperature > 85.0f) {
+                        g_bms_handle.modules[module].cells[cell].fault_flags |= AKS_BMS_FAULT_TEMP_SENSOR;
+                    } else {
+                        g_bms_handle.modules[module].cells[cell].fault_flags &= ~AKS_BMS_FAULT_TEMP_SENSOR;
+                    }
+                } else {
+                    /* Sensor fault - open circuit or short */
+                    g_bms_handle.modules[module].cells[cell].temperature = 85.0f; /* Conservative estimate */
+                    g_bms_handle.modules[module].cells[cell].fault_flags |= AKS_BMS_FAULT_TEMP_SENSOR;
+                }
+            } else {
+                /* ADC read failure */
+                g_bms_handle.modules[module].cells[cell].temperature = 85.0f;
+                g_bms_handle.modules[module].cells[cell].fault_flags |= AKS_BMS_FAULT_TEMP_SENSOR;
+            }
+            
             total_temp += g_bms_handle.modules[module].cells[cell].temperature;
         }
         

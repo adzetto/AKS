@@ -375,17 +375,40 @@ static aks_result_t aks_steering_pid_init(void)
  */
 static float aks_steering_read_position(void)
 {
-    /* Read position from potentiometer/encoder */
-    /* Convert ADC value to angle */
+    /* Read position from dual redundant potentiometers */
+    uint16_t adc_raw_1, adc_raw_2;
+    float adc_voltage_1, adc_voltage_2;
     
-    // Placeholder implementation
-    static float simulated_position = 0.0f;
-    
-    // Simulate position following target with some lag
-    float error = g_steering_handle.target_angle - simulated_position;
-    simulated_position += error * 0.1f;
-    
-    return simulated_position;
+    /* Primary position sensor */
+    if (aks_adc_read_channel(AKS_ADC_CH_STEERING_POS_1, &adc_raw_1, &adc_voltage_1) == AKS_OK &&
+        aks_adc_read_channel(AKS_ADC_CH_STEERING_POS_2, &adc_raw_2, &adc_voltage_2) == AKS_OK) {
+        
+        /* Convert ADC voltages to angles */
+        /* Assuming 0.5V = -45°, 4.5V = +45° for both sensors */
+        float angle_1 = ((adc_voltage_1 - 0.5f) / 4.0f) * 90.0f - 45.0f;
+        float angle_2 = ((adc_voltage_2 - 0.5f) / 4.0f) * 90.0f - 45.0f;
+        
+        /* Check sensor correlation */
+        float sensor_diff = fabsf(angle_1 - angle_2);
+        if (sensor_diff > 5.0f) {
+            /* Sensor mismatch - use more conservative reading */
+            g_steering_handle.fault_count++;
+            /* Return angle closer to center for safety */
+            if (fabsf(angle_1) < fabsf(angle_2)) {
+                return angle_1;
+            } else {
+                return angle_2;
+            }
+        } else {
+            /* Normal operation - use average */
+            return (angle_1 + angle_2) / 2.0f;
+        }
+        
+    } else {
+        /* ADC read failure - maintain last position */
+        g_steering_handle.fault_count++;
+        return g_steering_handle.current_angle;
+    }
 }
 
 /**
