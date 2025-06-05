@@ -23,6 +23,8 @@
 #define AKS_BRAKE_UPDATE_RATE_HZ        100         /**< Brake update rate (Hz) */
 #define AKS_BRAKE_PEDAL_DEADBAND        5.0f        /**< Brake pedal deadband (%) */
 #define AKS_BRAKE_BLEND_TRANSITION      30.0f       /**< Regen to hydraulic transition (%) */
+#define AKS_BRAKE_TEMP_CRITICAL         200.0f      /**< Critical temperature threshold (°C) */
+#define AKS_BRAKE_TEMP_NORMAL           150.0f      /**< Normal temperature threshold (°C) */
 
 /* Brake Types */
 typedef enum {
@@ -409,32 +411,87 @@ static void aks_brake_update_pedal_input(void)
  */
 static void aks_brake_update_wheel_speeds(void)
 {
-    /* In real implementation, this would read from wheel speed sensors */
-    /* For now, simulate based on motor speed and vehicle dynamics */
-    
-    float vehicle_speed = 0.0f; /* Would get from vehicle speed sensor */
-    
+    /* Read actual wheel speed sensors (Hall sensors or encoders) */
     for (uint8_t i = 0; i < AKS_BRAKE_MAX_WHEELS; i++) {
         aks_brake_wheel_t* wheel = &g_brake_system.wheels[i];
         
-        /* Simulate wheel speed with some variation */
-        wheel->wheel_speed = vehicle_speed + (float)(rand() % 10 - 5) * 0.1f;
+        /* Read wheel speed from dedicated ADC channel or pulse counter */
+        uint16_t raw_speed_value;
+        float sensor_voltage;
+        uint8_t speed_channel = AKS_ADC_CHANNEL_WHEEL_SPEED_BASE + i;
         
-        /* Update brake temperature (simplified model) */
-        if (wheel->actual_torque > 0.0f) {
-            wheel->temperature += 0.1f; /* Heat up during braking */
+        if (aks_adc_read_channel(speed_channel, &raw_speed_value, &sensor_voltage) == AKS_OK) {
+            /* Convert sensor voltage to wheel speed (rad/s) */
+            /* Assuming linear Hall sensor: 0.5V=0 rad/s, 4.5V=150 rad/s */
+            float normalized_voltage = (sensor_voltage - 0.5f) / 4.0f;
+            if (normalized_voltage < 0.0f) normalized_voltage = 0.0f;
+            if (normalized_voltage > 1.0f) normalized_voltage = 1.0f;
+            
+            wheel->wheel_speed = normalized_voltage * 150.0f; /* Max 150 rad/s */
         } else {
-            wheel->temperature -= 0.05f; /* Cool down */
-            if (wheel->temperature < 25.0f) {
-                wheel->temperature = 25.0f;
+            /* Sensor fault - use last known value or estimate */
+            wheel->wheel_speed = wheel->wheel_speed * 0.98f; /* Gradual decay */
+            wheel->fault_detected = true;
+        }
+        
+        /* Read brake temperature from thermistor */
+        uint8_t temp_channel = AKS_ADC_CHANNEL_BRAKE_TEMP_BASE + i;
+        if (aks_adc_read_channel(temp_channel, &raw_speed_value, &sensor_voltage) == AKS_OK) {
+            /* Convert thermistor voltage to temperature using Steinhart-Hart equation */
+            /* Assuming 10kΩ NTC thermistor with pull-up resistor */
+            float resistance = (sensor_voltage * 10000.0f) / (3.3f - sensor_voltage);
+            if (resistance > 0.0f && sensor_voltage < 3.2f) {
+                /* Simplified temperature calculation for NTC 10kΩ at 25°C */
+                float temp_kelvin = 1.0f / (0.001129f + 0.000234f * logf(resistance) + 
+                                           0.0000000876f * powf(logf(resistance), 3.0f));
+                wheel->temperature = temp_kelvin - 273.15f; /* Convert to Celsius */
+            } else {
+                /* Sensor fault or open circuit */
+                wheel->temperature = 150.0f; /* Assume high temperature for safety */
+                wheel->fault_detected = true;
             }
         }
         
-        /* Check overheating */
-        if (wheel->temperature > 200.0f) {
+        /* Real-time brake temperature model based on energy dissipation */
+        if (wheel->actual_torque > 0.0f) {
+            /* Heat generation: Q = T * ω (Torque * Angular velocity) */
+            float heat_generation = wheel->actual_torque * fabsf(wheel->wheel_speed);
+            
+            /* Heat dissipation model: Q_loss = h * A * (T - T_ambient) */
+            float ambient_temp = 25.0f;
+            float heat_dissipation = 0.5f * (wheel->temperature - ambient_temp);
+            
+            /* Temperature change: dT/dt = (Q_gen - Q_loss) / (m * c_p) */
+            float thermal_mass = 2.5f; /* kg equivalent thermal mass */
+            float specific_heat = 460.0f; /* J/kg·K for steel */
+            float dt = 0.01f; /* 10ms update period */
+            
+            float temp_change = (heat_generation - heat_dissipation) / (thermal_mass * specific_heat) * dt;
+            wheel->temperature += temp_change;
+            
+            /* Limit temperature rise rate for realism */
+            if (temp_change > 2.0f) {
+                wheel->temperature = wheel->temperature - temp_change + 2.0f;
+            }
+        } else {
+            /* Cooling when not braking */
+            float ambient_temp = 25.0f;
+            float cooling_rate = 0.1f; /* °C/s cooling rate */
+            float dt = 0.01f;
+            
+            if (wheel->temperature > ambient_temp) {
+                wheel->temperature -= cooling_rate * dt;
+                if (wheel->temperature < ambient_temp) {
+                    wheel->temperature = ambient_temp;
+                }
+            }
+        }
+        
+        /* Check overheating with hysteresis */
+        if (wheel->temperature > AKS_BRAKE_TEMP_CRITICAL) {
             wheel->overheated = true;
             g_brake_stats.overheating_events++;
-        } else if (wheel->temperature < 150.0f) {
+        } else if (wheel->temperature < AKS_BRAKE_TEMP_NORMAL) {
             wheel->overheated = false;
         }
     }
