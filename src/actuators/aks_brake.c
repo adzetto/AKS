@@ -376,34 +376,76 @@ aks_result_t aks_brake_get_stats(uint32_t* brake_applications, uint32_t* abs_act
  */
 static void aks_brake_update_pedal_input(void)
 {
-    /* Read brake pedal position from ADC */
-    uint16_t adc_raw;
-    float adc_voltage;
+    /* Read brake pedal position from dual redundant potentiometers */
+    uint16_t adc_raw_1, adc_raw_2;
+    float adc_voltage_1, adc_voltage_2;
     
-    if (aks_adc_read_channel(AKS_ADC_CH_BRAKE_PEDAL, &adc_raw, &adc_voltage) == AKS_OK) {
-        /* Convert ADC reading to pedal position percentage */
-        g_brake_system.brake_pedal_position = (adc_voltage / 3.3f) * 100.0f;
+    /* Primary and secondary brake pedal sensors */
+    if (aks_adc_read_channel(AKS_ADC_CH_BRAKE_PEDAL, &adc_raw_1, &adc_voltage_1) == AKS_OK &&
+        aks_adc_read_channel(AKS_ADC_CH_BRAKE_PEDAL + 1, &adc_raw_2, &adc_voltage_2) == AKS_OK) {
+        
+        /* Convert voltages to percentages */
+        float pedal_1 = ((adc_voltage_1 - 0.5f) / 4.0f) * 100.0f; /* 0.5-4.5V range */
+        float pedal_2 = ((adc_voltage_2 - 0.5f) / 4.0f) * 100.0f; /* Redundant sensor */
+        
+        /* Clamp to valid range */
+        if (pedal_1 < 0.0f) pedal_1 = 0.0f;
+        if (pedal_1 > 100.0f) pedal_1 = 100.0f;
+        if (pedal_2 < 0.0f) pedal_2 = 0.0f;
+        if (pedal_2 > 100.0f) pedal_2 = 100.0f;
+        
+        /* Check sensor correlation for fault detection */
+        float sensor_diff = fabsf(pedal_1 - pedal_2);
+        if (sensor_diff > 10.0f) {
+            /* Sensor mismatch - possible fault */
+            g_brake_system.system_fault = true;
+            /* Use the lower value for safety */
+            g_brake_system.brake_pedal_position = (pedal_1 < pedal_2) ? pedal_1 : pedal_2;
+        } else {
+            /* Normal operation - use average */
+            g_brake_system.brake_pedal_position = (pedal_1 + pedal_2) / 2.0f;
+            g_brake_system.system_fault = false;
+        }
         
         /* Apply deadband */
         if (g_brake_system.brake_pedal_position < AKS_BRAKE_PEDAL_DEADBAND) {
             g_brake_system.brake_pedal_position = 0.0f;
         }
         
-        /* Calculate brake pedal force (estimated) */
-        g_brake_system.brake_pedal_force = g_brake_system.brake_pedal_position * 5.0f; /* 5N per % */
-        
-        /* Update statistics */
-        if (g_brake_system.brake_pedal_position > AKS_BRAKE_PEDAL_DEADBAND) {
-            static bool brake_was_applied = false;
-            if (!brake_was_applied) {
-                g_brake_stats.total_brake_applications++;
-                brake_was_applied = true;
-            }
+        /* Read brake pedal force from load cell (optional) */
+        uint16_t force_raw;
+        float force_voltage;
+        if (aks_adc_read_channel(AKS_ADC_CH_BRAKE_FORCE, &force_raw, &force_voltage) == AKS_OK) {
+            /* Convert load cell output to force (assuming 0-500N range) */
+            g_brake_system.brake_pedal_force = (force_voltage / 3.3f) * 500.0f;
         } else {
-            static bool brake_was_applied = true;
-            brake_was_applied = false;
+            /* Estimate force from position if load cell not available */
+            g_brake_system.brake_pedal_force = g_brake_system.brake_pedal_position * 3.0f; /* N */
+        }
+        
+    } else {
+        /* ADC read failure - maintain last known state and set fault */
+        g_brake_system.system_fault = true;
+        /* Gradually reduce pedal position for safety */
+        g_brake_system.brake_pedal_position *= 0.95f;
+        if (g_brake_system.brake_pedal_position < 1.0f) {
+            g_brake_system.brake_pedal_position = 0.0f;
         }
     }
+    
+    /* Update brake lights with hysteresis */
+    if (g_brake_system.brake_pedal_position > 8.0f) {
+        g_brake_system.brake_lights_on = true;
+    } else if (g_brake_system.brake_pedal_position < 3.0f) {
+        g_brake_system.brake_lights_on = false;
+    }
+    
+    /* Update statistics */
+    static float last_pedal_position = 0.0f;
+    if (last_pedal_position < 10.0f && g_brake_system.brake_pedal_position > 10.0f) {
+        g_brake_stats.total_brake_applications++;
+    }
+    last_pedal_position = g_brake_system.brake_pedal_position;
 }
 
 /**
