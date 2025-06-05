@@ -523,14 +523,66 @@ static aks_result_t aks_telemetry_collect_vehicle_data(void)
 static aks_result_t aks_telemetry_collect_gps_data(void)
 {
     /* Read GPS data from GPS module */
-    g_telemetry_handle.gps_data.valid = true;
-    g_telemetry_handle.gps_data.latitude = 41.0082;    // Istanbul coordinates (example)
-    g_telemetry_handle.gps_data.longitude = 28.9784;
-    g_telemetry_handle.gps_data.altitude = 100.0f;
-    g_telemetry_handle.gps_data.speed = g_telemetry_handle.vehicle_data.vehicle_speed;
-    g_telemetry_handle.gps_data.heading = 0.0f;
-    g_telemetry_handle.gps_data.satellites = 8;
-    g_telemetry_handle.gps_data.timestamp = aks_core_get_tick();
+    aks_gps_data_t gps_data;
+    aks_result_t result = aks_gps_get_data(&gps_data);
+    
+    if (result == AKS_OK && aks_gps_has_fix()) {
+        /* GPS fix available - use real data */
+        g_telemetry_handle.gps_data.valid = gps_data.valid;
+        g_telemetry_handle.gps_data.latitude = gps_data.latitude;
+        g_telemetry_handle.gps_data.longitude = gps_data.longitude;
+        g_telemetry_handle.gps_data.altitude = gps_data.altitude;
+        g_telemetry_handle.gps_data.speed = gps_data.speed;
+        g_telemetry_handle.gps_data.heading = gps_data.heading;
+        g_telemetry_handle.gps_data.satellites = gps_data.satellites;
+        g_telemetry_handle.gps_data.timestamp = gps_data.timestamp;
+        
+        /* Update last GPS time */
+        g_telemetry_handle.last_gps_time = aks_core_get_tick();
+    } else {
+        /* No GPS fix - mark as invalid and use estimated data */
+        g_telemetry_handle.gps_data.valid = false;
+        
+        /* Keep previous coordinates if available */
+        if (g_telemetry_handle.gps_data.latitude == 0.0 && g_telemetry_handle.gps_data.longitude == 0.0) {
+            /* First time - use default coordinates (race track location) */
+            g_telemetry_handle.gps_data.latitude = 41.0082;    /* Istanbul Park coordinates */
+            g_telemetry_handle.gps_data.longitude = 28.9784;
+        }
+        
+        /* Estimate altitude based on region */
+        g_telemetry_handle.gps_data.altitude = 100.0f; /* Sea level + some elevation */
+        
+        /* Use vehicle speed from wheel sensors as GPS speed estimate */
+        g_telemetry_handle.gps_data.speed = g_telemetry_handle.vehicle_data.vehicle_speed;
+        
+        /* Estimate heading from previous GPS data or compass */
+        static float last_valid_heading = 0.0f;
+        if (g_telemetry_handle.gps_data.heading == 0.0f) {
+            /* Try to read from compass/magnetometer */
+            float compass_heading = aks_sensor_read_compass_heading();
+            if (compass_heading >= 0.0f && compass_heading <= 360.0f) {
+                g_telemetry_handle.gps_data.heading = compass_heading;
+                last_valid_heading = compass_heading;
+            } else {
+                g_telemetry_handle.gps_data.heading = last_valid_heading;
+            }
+        }
+        
+        /* GPS satellite count is 0 when no fix */
+        g_telemetry_handle.gps_data.satellites = 0;
+        
+        g_telemetry_handle.gps_data.timestamp = aks_core_get_tick();
+    }
+    
+    /* Check GPS data staleness */
+    uint32_t current_time = aks_core_get_tick();
+    if (current_time - g_telemetry_handle.last_gps_time > 10000) { /* 10 seconds */
+        /* GPS data is stale */
+        g_telemetry_handle.gps_data.valid = false;
+        aks_logger_warning("GPS data is stale - last update %lu ms ago", 
+                          current_time - g_telemetry_handle.last_gps_time);
+    }
     
     return AKS_OK;
 }
