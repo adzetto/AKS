@@ -128,6 +128,24 @@ extern "C" {
 #define AKS_ADC_CH_ISOLATION_NEG    5           /**< Isolation negative */
 #define AKS_ADC_CH_BRAKE_PRESSURE   6           /**< Brake pressure */
 #define AKS_ADC_CH_THROTTLE_POS     7           /**< Throttle position */
+#define AKS_ADC_CH_BRAKE_PEDAL      8           /**< Brake pedal position 1 */
+#define AKS_ADC_CH_BRAKE_FORCE      9           /**< Brake pedal force */
+#define AKS_ADC_CH_STEERING_POS_1   10          /**< Steering position 1 */
+#define AKS_ADC_CH_STEERING_POS_2   11          /**< Steering position 2 */
+
+/* ADC Channel Bases for Arrays */
+#define AKS_ADC_CHANNEL_WHEEL_SPEED_BASE    12  /**< Wheel speed sensors base */
+#define AKS_ADC_CHANNEL_BRAKE_TEMP_BASE     16  /**< Brake temperature base */
+#define AKS_ADC_CH_BATTERY_TEMP_BASE        20  /**< Battery temp sensors base */
+#define AKS_ADC_CH_BATTERY_CURRENT_BASE     36  /**< Battery current sensors base */
+#define AKS_ADC_CH_BMS_TEMP_BASE            40  /**< BMS temperature base */
+
+/* Additional Constants */
+#define AKS_BATTERY_VOLTAGE_SCALE_FACTOR    1.0f    /**< Battery voltage scaling */
+#define AKS_ISOLATION_SETTLING_TIME_MS      50      /**< Isolation settling time */
+#define AKS_BMS_FAULT_VOLTAGE_SENSOR        (1<<0)  /**< BMS voltage sensor fault */
+#define AKS_BMS_FAULT_TEMP_SENSOR           (1<<1)  /**< BMS temp sensor fault */
+#define AKS_BMS_FAULT_COMMUNICATION         (1<<2)  /**< BMS communication fault */
 
 /* ADC Scaling Factors */
 #define AKS_ADC_BATTERY_VOLTAGE_SCALE   0.0244f /**< Battery voltage scale (80V/3.3V) */
