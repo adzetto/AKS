@@ -398,12 +398,35 @@ static aks_result_t aks_protocol_decode_frame(const uint8_t* buffer, uint16_t le
         return AKS_ERROR_OVERFLOW;
     }
     
-    /* Fill message structure */
-    message->id = (buffer[4] << 8) | buffer[5]; /* Use length as temporary ID */
+    /* Generate message ID based on message type and source */
+    uint8_t msg_type = buffer[1];
+    uint8_t source_id = buffer[2];
+    static uint16_t sequence_counter = 0;
+    
+    /* Create unique message ID: [msg_type:4][source_id:4][sequence:8] */
+    message->id = ((uint16_t)(msg_type & 0x0F) << 12) | 
+                  ((uint16_t)(source_id & 0x0F) << 8) | 
+                  (sequence_counter++ & 0xFF);
+    
     message->length = payload_length;
     memcpy(message->data, &buffer[6], payload_length);
-    message->timestamp = 0; /* Would be set by receiver */
-    message->priority = AKS_PRIORITY_NORMAL;
+    message->timestamp = aks_core_get_tick(); /* Set current timestamp */
+    
+    /* Determine priority based on message type */
+    switch (msg_type) {
+        case AKS_MSG_TYPE_HEARTBEAT:
+            message->priority = AKS_PRIORITY_LOW;
+            break;
+        case AKS_MSG_TYPE_COMMAND:
+        case AKS_MSG_TYPE_ERROR:
+            message->priority = AKS_PRIORITY_HIGH;
+            break;
+        case AKS_MSG_TYPE_RESPONSE:
+        case AKS_MSG_TYPE_DATA:
+        default:
+            message->priority = AKS_PRIORITY_NORMAL;
+            break;
+    }
     
     g_stats.frames_received++;
     
