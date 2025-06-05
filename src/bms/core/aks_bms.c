@@ -394,12 +394,38 @@ static aks_result_t aks_bms_read_cell_voltages(void)
         float module_voltage = 0.0f;
         
         for (uint8_t cell = 0; cell < g_bms_handle.config.cells_per_module; cell++) {
-            /* Simulate cell voltage reading */
-            float base_voltage = AKS_BMS_NOMINAL_VOLTAGE + (g_bms_handle.status.soc - 50.0f) * 0.01f;
-            float variation = (float)(rand() % 100 - 50) / 1000.0f; // ±50mV variation
+            /* Read actual cell voltage via LTC6811-1 or similar BMS IC */
+            uint16_t raw_voltage;
+            aks_result_t result = aks_bms_ic_read_cell_voltage(module, cell, &raw_voltage);
             
-            g_bms_handle.modules[module].cells[cell].voltage = base_voltage + variation;
-            module_voltage += g_bms_handle.modules[module].cells[cell].voltage;
+            if (result == AKS_OK) {
+                /* Convert raw ADC value to voltage */
+                /* LTC6811-1: 16-bit ADC, 0-5V range with 100µV resolution */
+                float voltage = (float)raw_voltage * 0.0001f; /* 100µV per LSB */
+                
+                /* Apply calibration and filtering */
+                voltage *= g_bms_handle.calibration_factors[module][cell];
+                
+                /* Simple low-pass filter to reduce noise */
+                float alpha = 0.9f; /* Filter coefficient */
+                g_bms_handle.modules[module].cells[cell].voltage = 
+                    alpha * g_bms_handle.modules[module].cells[cell].voltage + 
+                    (1.0f - alpha) * voltage;
+                
+                /* Validate voltage range */
+                if (voltage < 0.5f || voltage > 5.0f) {
+                    g_bms_handle.modules[module].cells[cell].fault_flags |= AKS_BMS_FAULT_VOLTAGE_SENSOR;
+                } else {
+                    g_bms_handle.modules[module].cells[cell].fault_flags &= ~AKS_BMS_FAULT_VOLTAGE_SENSOR;
+                }
+                
+                module_voltage += g_bms_handle.modules[module].cells[cell].voltage;
+            } else {
+                /* Communication error with BMS IC */
+                g_bms_handle.modules[module].communication_ok = false;
+                g_bms_handle.modules[module].cells[cell].fault_flags |= AKS_BMS_FAULT_COMMUNICATION;
+                return AKS_ERROR_COMMUNICATION;
+            }
         }
         
         g_bms_handle.modules[module].module_voltage = module_voltage;
