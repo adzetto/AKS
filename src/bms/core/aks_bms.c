@@ -8,6 +8,9 @@
 
 #include "aks_core.h"
 #include "aks_safety.h"
+#include "aks_bms_ic.h"
+#include "aks_current.h"
+#include "aks_adc.h"
 #include <string.h>
 #include <math.h>
 
@@ -107,6 +110,9 @@ typedef struct {
     bool contactors_closed;         /**< Main contactors status */
     bool precharge_complete;        /**< Precharge status */
     
+    /* Calibration data */
+    float calibration_factors[AKS_BMS_MAX_MODULES][AKS_BMS_CELLS_PER_MODULE]; /**< Voltage calibration factors */
+    
 } aks_bms_handle_t;
 
 /* Global Variables */
@@ -159,6 +165,13 @@ aks_result_t aks_bms_init(void)
     
     /* Clear modules data */
     memset(g_bms_handle.modules, 0, sizeof(g_bms_handle.modules));
+    
+    /* Initialize calibration factors to 1.0 (no correction) */
+    for (uint8_t m = 0; m < AKS_BMS_MAX_MODULES; m++) {
+        for (uint8_t c = 0; c < AKS_BMS_CELLS_PER_MODULE; c++) {
+            g_bms_handle.calibration_factors[m][c] = 1.0f;
+        }
+    }
     
     /* Initialize hardware */
     aks_result_t result = aks_bms_hardware_init();
