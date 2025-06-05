@@ -356,14 +356,89 @@ aks_result_t aks_telemetry_get_stats(uint32_t* packets_sent, uint32_t* packets_f
  */
 static aks_result_t aks_telemetry_hardware_init(void)
 {
-    /* Initialize LoRa module */
-    g_telemetry_handle.lora_available = true; // Assume available for now
+    aks_result_t result = AKS_OK;
     
-    /* Initialize WiFi module */
-    g_telemetry_handle.wifi_available = true; // Assume available for now
+    /* Initialize LoRa module (SX1278/SX1276) */
+    aks_lora_config_t lora_config = {
+        .frequency = 868000000,         /* 868 MHz for Europe */
+        .spreading_factor = 12,         /* SF12 for maximum range */
+        .bandwidth = 125000,            /* 125 kHz bandwidth */
+        .coding_rate = 5,               /* 4/5 coding rate */
+        .tx_power = 14,                 /* 14 dBm TX power */
+        .crc_enabled = true,            /* Enable CRC */
+        .preamble_length = 8,           /* 8 symbol preamble */
+        .sync_word = 0x12              /* Private sync word */
+    };
     
-    /* Initialize GPS module */
-    g_telemetry_handle.gps_available = true; // Assume available for now
+    result = aks_lora_init(&lora_config);
+    if (result == AKS_OK) {
+        g_telemetry_handle.lora_available = true;
+        aks_logger_info("LoRa module initialized successfully");
+    } else {
+        g_telemetry_handle.lora_available = false;
+        aks_logger_error("LoRa module initialization failed: %d", result);
+    }
+    
+    /* Initialize WiFi module (ESP8266/ESP32) */
+    aks_wifi_config_t wifi_config = {
+        .ssid = "AKS_Telemetry_AP",
+        .password = "aks2025_secure!",
+        .mode = AKS_WIFI_MODE_CLIENT_AP,   /* Client and AP mode */
+        .channel = 6,                      /* WiFi channel 6 */
+        .max_connections = 4,              /* Max 4 connections in AP mode */
+        .keepalive_interval = 30000,       /* 30 second keepalive */
+        .max_retry = 3,                    /* 3 connection retries */
+        .use_ssl = true,                   /* Use SSL/TLS */
+        .server_url = "https://telemetry.aks.local",
+        .server_port = 8443                /* HTTPS port */
+    };
+    
+    result = aks_wifi_init(&wifi_config);
+    if (result == AKS_OK) {
+        g_telemetry_handle.wifi_available = true;
+        aks_logger_info("WiFi module initialized successfully");
+    } else {
+        g_telemetry_handle.wifi_available = false;
+        aks_logger_error("WiFi module initialization failed: %d", result);
+    }
+    
+    /* Initialize GPS module (u-blox NEO-6M/8M) */
+    aks_gps_config_t gps_config = {
+        .baudrate = 9600,               /* Standard GPS baudrate */
+        .update_rate = 1,               /* 1 Hz update rate */
+        .enable_glonass = true,         /* Enable GLONASS */
+        .enable_galileo = false,        /* Disable Galileo for now */
+        .enable_sbas = true,            /* Enable SBAS */
+        .fix_timeout = 30000,           /* 30 second fix timeout */
+        .min_satellites = 4,            /* Minimum 4 satellites for fix */
+        .power_save = false             /* Disable power save for racing */
+    };
+    
+    result = aks_gps_init(&gps_config);
+    if (result == AKS_OK) {
+        g_telemetry_handle.gps_available = true;
+        aks_logger_info("GPS module initialized successfully");
+    } else {
+        g_telemetry_handle.gps_available = false;
+        aks_logger_error("GPS module initialization failed: %d", result);
+    }
+    
+    /* Check if at least one communication method is available */
+    if (!g_telemetry_handle.lora_available && !g_telemetry_handle.wifi_available) {
+        aks_logger_error("No telemetry communication modules available");
+        return AKS_ERROR_HARDWARE;
+    }
+    
+    /* Initialize antenna switching if multiple modules available */
+    if (g_telemetry_handle.lora_available && g_telemetry_handle.wifi_available) {
+        /* Configure RF switch for antenna sharing */
+        aks_gpio_set_pin_mode(AKS_GPIO_RF_SWITCH_LORA, AKS_GPIO_MODE_OUTPUT);
+        aks_gpio_set_pin_mode(AKS_GPIO_RF_SWITCH_WIFI, AKS_GPIO_MODE_OUTPUT);
+        
+        /* Default to LoRa antenna */
+        aks_gpio_write_pin(AKS_GPIO_RF_SWITCH_LORA, true);
+        aks_gpio_write_pin(AKS_GPIO_RF_SWITCH_WIFI, false);
+    }
     
     return AKS_OK;
 }
