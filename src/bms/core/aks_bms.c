@@ -389,9 +389,189 @@ aks_result_t aks_bms_emergency_stop(void)
  */
 static aks_result_t aks_bms_hardware_init(void)
 {
-    /* Initialize SPI/I2C for cell monitoring ICs */
-    /* Initialize GPIO for contactors and balancing */
-    /* Initialize ADC for current and temperature sensing */
+    aks_result_t result = AKS_OK;
+    
+    /* Initialize SPI for LTC6811-1 cell monitoring ICs */
+    aks_spi_config_t spi_config = {
+        .mode = AKS_SPI_MODE_MASTER,
+        .data_size = 8,                     /* 8-bit data */
+        .clock_polarity = AKS_SPI_CPOL_LOW, /* Clock polarity 0 */
+        .clock_phase = AKS_SPI_CPHA_1EDGE,  /* Clock phase 0 */
+        .baudrate_prescaler = 16,           /* ~1 MHz SPI clock */
+        .first_bit = AKS_SPI_FIRSTBIT_MSB,  /* MSB first */
+        .nss_mode = AKS_SPI_NSS_SOFT,       /* Software NSS */
+        .enable_crc = false                 /* No hardware CRC */
+    };
+    
+    result = aks_spi_init(AKS_SPI_BMS_INSTANCE, &spi_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize BMS SPI: %d", result);
+        return result;
+    }
+    
+    /* Configure SPI devices for each LTC6811-1 IC */
+    for (uint8_t module = 0; module < g_bms_handle.config.num_modules; module++) {
+        aks_spi_device_t device_config = {
+            .instance = AKS_SPI_BMS_INSTANCE,
+            .cs_pin = AKS_GPIO_BMS_CS_BASE + module,  /* CS pin for each module */
+            .cs_active_low = true,
+            .cs_setup_time_ns = 100,                  /* Setup time */
+            .cs_hold_time_ns = 100,                   /* Hold time */
+            .max_speed_hz = 1000000                   /* 1 MHz max */
+        };
+        
+        result = aks_spi_device_init(&device_config);
+        if (result != AKS_OK) {
+            aks_logger_error("Failed to initialize BMS module %d SPI device: %d", module, result);
+            return result;
+        }
+    }
+    
+    /* Initialize GPIO for BMS control signals */
+    aks_gpio_config_t gpio_config = {
+        .mode = AKS_GPIO_MODE_OUTPUT_PP,
+        .pull = AKS_GPIO_PULL_NONE,
+        .speed = AKS_GPIO_SPEED_LOW
+    };
+    
+    /* Initialize main battery contactors */
+    result = aks_gpio_init(AKS_GPIO_BMS_MAIN_CONTACTOR_POS, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_BMS_MAIN_CONTACTOR_NEG, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_BMS_PRECHARGE_CONTACTOR, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Initialize cooling system control */
+    result = aks_gpio_init(AKS_GPIO_BMS_COOLING_PUMP, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_BMS_COOLING_FAN_1, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_BMS_COOLING_FAN_2, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Initialize isolation monitoring control */
+    result = aks_gpio_init(AKS_GPIO_BMS_ISOLATION_ENABLE, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Configure input GPIOs for status monitoring */
+    gpio_config.mode = AKS_GPIO_MODE_INPUT;
+    gpio_config.pull = AKS_GPIO_PULL_UP;
+    
+    result = aks_gpio_init(AKS_GPIO_BMS_EMERGENCY_STOP, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_BMS_INTERLOCK_STATUS, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    result = aks_gpio_init(AKS_GPIO_BMS_CHARGER_CONNECTED, &gpio_config);
+    if (result != AKS_OK) return result;
+    
+    /* Initialize all contactors to safe (open) state */
+    aks_gpio_write(AKS_GPIO_BMS_MAIN_CONTACTOR_POS, false);
+    aks_gpio_write(AKS_GPIO_BMS_MAIN_CONTACTOR_NEG, false);
+    aks_gpio_write(AKS_GPIO_BMS_PRECHARGE_CONTACTOR, false);
+    
+    /* Turn off cooling initially */
+    aks_gpio_write(AKS_GPIO_BMS_COOLING_PUMP, false);
+    aks_gpio_write(AKS_GPIO_BMS_COOLING_FAN_1, false);
+    aks_gpio_write(AKS_GPIO_BMS_COOLING_FAN_2, false);
+    
+    /* Enable isolation monitoring */
+    aks_gpio_write(AKS_GPIO_BMS_ISOLATION_ENABLE, true);
+    
+    /* Initialize ADC channels for current sensing */
+    aks_adc_channel_config_t adc_channels[] = {
+        {AKS_ADC_CH_BMS_PACK_CURRENT, AKS_ADC_SAMPLING_TIME_15_CYCLES, true},
+        {AKS_ADC_CH_BMS_PACK_VOLTAGE, AKS_ADC_SAMPLING_TIME_15_CYCLES, true},
+        {AKS_ADC_CH_BMS_12V_SUPPLY, AKS_ADC_SAMPLING_TIME_15_CYCLES, false},
+        {AKS_ADC_CH_BMS_ISOLATION_MON, AKS_ADC_SAMPLING_TIME_480_CYCLES, false}
+    };
+    
+    for (uint8_t i = 0; i < 4; i++) {
+        result = aks_adc_configure_channel(&adc_channels[i]);
+        if (result != AKS_OK) {
+            aks_logger_error("Failed to configure BMS ADC channel %d: %d", adc_channels[i].channel, result);
+            return result;
+        }
+    }
+    
+    /* Initialize temperature monitoring ADC channels */
+    for (uint8_t module = 0; module < g_bms_handle.config.num_modules; module++) {
+        for (uint8_t cell = 0; cell < g_bms_handle.config.cells_per_module; cell++) {
+            aks_adc_channel_config_t temp_channel = {
+                .channel = AKS_ADC_CH_BMS_TEMP_BASE + (module * g_bms_handle.config.cells_per_module + cell),
+                .sampling_time = AKS_ADC_SAMPLING_TIME_480_CYCLES,
+                .differential = false
+            };
+            
+            result = aks_adc_configure_channel(&temp_channel);
+            if (result != AKS_OK) {
+                aks_logger_warning("Failed to configure temperature channel for module %d cell %d", module, cell);
+            }
+        }
+    }
+    
+    /* Initialize PWM for active balancing (if equipped) */
+    if (g_bms_handle.config.enable_balancing) {
+        aks_pwm_config_t pwm_config = {
+            .frequency = 1000,              /* 1 kHz for balancing */
+            .duty_cycle = 0.0f,             /* Start disabled */
+            .polarity = AKS_PWM_POLARITY_HIGH,
+            .dead_time_ns = 0,              /* No dead time for balancing */
+            .enable_complementary = false
+        };
+        
+        for (uint8_t i = 0; i < AKS_BMS_MAX_BALANCE_CHANNELS; i++) {
+            result = aks_pwm_init(AKS_PWM_BMS_BALANCE_BASE + i, &pwm_config);
+            if (result != AKS_OK) {
+                aks_logger_warning("Failed to initialize balancing PWM channel %d: %d", i, result);
+            }
+        }
+    }
+    
+    /* Initialize emergency stop interrupt */
+    result = aks_gpio_configure_interrupt(AKS_GPIO_BMS_EMERGENCY_STOP,
+                                         AKS_GPIO_INTERRUPT_FALLING_EDGE,
+                                         aks_bms_emergency_stop);
+    if (result != AKS_OK) {
+        aks_logger_warning("Failed to configure BMS emergency stop interrupt: %d", result);
+    }
+    
+    /* Initialize status LEDs */
+    gpio_config.mode = AKS_GPIO_MODE_OUTPUT_PP;
+    result = aks_gpio_init(AKS_GPIO_BMS_STATUS_LED_GREEN, &gpio_config);
+    if (result == AKS_OK) {
+        result = aks_gpio_init(AKS_GPIO_BMS_STATUS_LED_RED, &gpio_config);
+    }
+    if (result == AKS_OK) {
+        result = aks_gpio_init(AKS_GPIO_BMS_STATUS_LED_BLUE, &gpio_config);
+    }
+    
+    /* Start with red LED on (not ready) */
+    aks_gpio_write(AKS_GPIO_BMS_STATUS_LED_RED, true);
+    aks_gpio_write(AKS_GPIO_BMS_STATUS_LED_GREEN, false);
+    aks_gpio_write(AKS_GPIO_BMS_STATUS_LED_BLUE, false);
+    
+    /* Initialize calibration factors to 1.0 (no correction) */
+    for (uint8_t module = 0; module < AKS_BMS_MAX_MODULES; module++) {
+        for (uint8_t cell = 0; cell < AKS_BMS_CELLS_PER_MODULE; cell++) {
+            g_bms_handle.calibration_factors[module][cell] = 1.0f;
+        }
+    }
+    
+    /* Initialize LTC6811-1 configuration */
+    result = aks_bms_ic_init();
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize BMS IC interface: %d", result);
+        return result;
+    }
+    
+    aks_logger_info("BMS hardware initialized successfully");
     
     return AKS_OK;
 }
