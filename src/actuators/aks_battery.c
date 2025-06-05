@@ -404,26 +404,61 @@ static void aks_battery_update_cells(void)
         for (uint8_t c = 0; c < module->cell_count; c++) {
             aks_battery_cell_t* cell = &module->cells[c];
             
-            /* Read cell voltage from ADC (simulated here) */
-            /* In real implementation, this would read from battery monitoring IC */
-            uint16_t adc_raw;
-            float adc_voltage;
-            uint8_t adc_channel = (m * module->cell_count + c) % 16; /* Map to available ADC channels */
+            /* Read cell voltage from battery monitoring IC (LTC6811-1 compatible) */
+            uint16_t cell_voltage_raw;
+            float cell_voltage_adc;
             
-            if (aks_adc_read_channel(adc_channel, &adc_raw, &adc_voltage) == AKS_OK) {
-                /* Convert ADC reading to cell voltage */
-                cell->voltage = adc_voltage * (AKS_BATTERY_CELL_MAX_V / 3.3f); /* Scale to cell voltage range */
+            /* Calculate BMS IC channel mapping */
+            uint8_t ic_address = m / 4; /* 4 modules per IC */
+            uint8_t cell_channel = (m % 4) * (module->cell_count) + c;
+            
+            /* Read voltage from BMS IC via SPI */
+            if (aks_bms_read_cell_voltage(ic_address, cell_channel, &cell_voltage_raw) == AKS_OK) {
+                /* Convert raw ADC to voltage (LTC6811 has 16-bit resolution, 0-5V range) */
+                cell_voltage_adc = (float)cell_voltage_raw * (5.0f / 65535.0f);
                 
-                /* Update SOC based on voltage */
-                cell->soc = aks_battery_calculate_soc_from_voltage(cell->voltage);
+                /* Apply voltage divider compensation if needed */
+                cell->voltage = cell_voltage_adc * AKS_BATTERY_VOLTAGE_SCALE_FACTOR;
                 
-                /* Update SOH */
-                cell->soh = aks_battery_calculate_soh(cell);
+                /* Validate voltage reading */
+                if (cell->voltage < 0.5f || cell->voltage > 5.0f) {
+                    cell->fault_detected = true;
+                    cell->fault_count++;
+                } else {
+                    /* Update SOC based on voltage */
+                    cell->soc = aks_battery_calculate_soc_from_voltage(cell->voltage);
+                    
+                    /* Update SOH based on capacity degradation */
+                    cell->soh = aks_battery_calculate_soh(cell);
+                }
+            } else {
+                /* Communication fault with BMS IC */
+                cell->fault_detected = true;
+                cell->fault_count++;
             }
             
-            /* Read cell temperature */
-            /* This would typically come from temperature sensors on each cell */
-            cell->temperature = 25.0f + (float)(rand() % 20) - 10.0f; /* Simulated temperature */
+            /* Read cell temperature from dedicated thermistor */
+            uint16_t temp_raw;
+            float temp_voltage;
+            uint8_t temp_channel = AKS_ADC_CH_BATTERY_TEMP_BASE + (m * module->cell_count + c);
+            
+            if (aks_adc_read_channel(temp_channel, &temp_raw, &temp_voltage) == AKS_OK) {
+                /* Convert thermistor voltage to temperature using beta equation */
+                /* Assuming 10kΩ NTC thermistor with β=3950K */
+                if (temp_voltage > 0.1f && temp_voltage < 3.2f) {
+                    float resistance = (temp_voltage * 10000.0f) / (3.3f - temp_voltage);
+                    float ln_r = logf(resistance / 10000.0f); /* R0 = 10kΩ at 25°C */
+                    float temp_kelvin = 1.0f / ((1.0f / 298.15f) + (ln_r / 3950.0f));
+                    cell->temperature = temp_kelvin - 273.15f;
+                } else {
+                    /* Sensor fault */
+                    cell->temperature = 85.0f; /* Assume high temp for safety */
+                    cell->fault_detected = true;
+                }
+            } else {
+                cell->temperature = 85.0f; /* Default to high temp on comm failure */
+                cell->fault_detected = true;
+            }
             
             /* Check for cell faults */
             if (cell->voltage < g_battery_limits.min_cell_voltage || 
