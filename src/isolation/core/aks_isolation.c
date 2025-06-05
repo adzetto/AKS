@@ -412,9 +412,156 @@ aks_result_t aks_isolation_emergency_stop(void)
  */
 static aks_result_t aks_isolation_hardware_init(void)
 {
+    aks_result_t result = AKS_OK;
+    
     /* Initialize GPIO for measurement relays */
-    /* Initialize ADC for voltage measurement */
-    /* Initialize measurement circuit */
+    aks_gpio_config_t gpio_config = {
+        .mode = AKS_GPIO_MODE_OUTPUT_PP,
+        .pull = AKS_GPIO_PULL_NONE,
+        .speed = AKS_GPIO_SPEED_LOW
+    };
+    
+    /* Initialize measurement relay control pins */
+    result = aks_gpio_init(AKS_GPIO_ISOLATION_RELAY_POS, &gpio_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize positive isolation relay GPIO: %d", result);
+        return result;
+    }
+    
+    result = aks_gpio_init(AKS_GPIO_ISOLATION_RELAY_NEG, &gpio_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize negative isolation relay GPIO: %d", result);
+        return result;
+    }
+    
+    /* Initialize measurement enable pin */
+    result = aks_gpio_init(AKS_GPIO_ISOLATION_MEASUREMENT_EN, &gpio_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize isolation measurement enable GPIO: %d", result);
+        return result;
+    }
+    
+    /* Initialize status output pin */
+    result = aks_gpio_init(AKS_GPIO_ISOLATION_STATUS_OUT, &gpio_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize isolation status output GPIO: %d", result);
+        return result;
+    }
+    
+    /* Initialize all relays to safe (open) state */
+    aks_gpio_write(AKS_GPIO_ISOLATION_RELAY_POS, false);
+    aks_gpio_write(AKS_GPIO_ISOLATION_RELAY_NEG, false);
+    aks_gpio_write(AKS_GPIO_ISOLATION_MEASUREMENT_EN, false);
+    aks_gpio_write(AKS_GPIO_ISOLATION_STATUS_OUT, false);
+    
+    /* Initialize ADC channels for voltage measurement */
+    aks_adc_channel_config_t adc_channels[] = {
+        {AKS_ADC_CH_ISOLATION_POS, AKS_ADC_SAMPLING_TIME_480_CYCLES, false},
+        {AKS_ADC_CH_ISOLATION_NEG, AKS_ADC_SAMPLING_TIME_480_CYCLES, false},
+        {AKS_ADC_CH_ISOLATION_REF, AKS_ADC_SAMPLING_TIME_15_CYCLES, false},
+        {AKS_ADC_CH_ISOLATION_SUPPLY, AKS_ADC_SAMPLING_TIME_15_CYCLES, false}
+    };
+    
+    for (uint8_t i = 0; i < 4; i++) {
+        result = aks_adc_configure_channel(&adc_channels[i]);
+        if (result != AKS_OK) {
+            aks_logger_error("Failed to configure isolation ADC channel %d: %d", 
+                           adc_channels[i].channel, result);
+            return result;
+        }
+    }
+    
+    /* Initialize measurement circuit control */
+    /* Configure measurement voltage generation (via DAC or PWM) */
+    aks_dac_config_t dac_config = {
+        .resolution = AKS_DAC_RESOLUTION_12BIT,
+        .output_buffer = true,
+        .trigger_mode = AKS_DAC_TRIGGER_SOFTWARE,
+        .wave_generation = AKS_DAC_WAVE_NONE
+    };
+    
+    result = aks_dac_init(AKS_DAC_ISOLATION_VOLTAGE, &dac_config);
+    if (result != AKS_OK) {
+        aks_logger_warning("Failed to initialize isolation DAC: %d", result);
+        /* Continue without DAC - use fixed measurement voltage */
+    } else {
+        /* Set measurement voltage (e.g., 12V scaled to DAC range) */
+        uint16_t dac_value = (uint16_t)((g_isolation_handle.config.measurement_voltage / 3.3f) * 4095.0f);
+        aks_dac_set_value(AKS_DAC_ISOLATION_VOLTAGE, dac_value);
+        aks_dac_enable(AKS_DAC_ISOLATION_VOLTAGE, true);
+    }
+    
+    /* Initialize timer for measurement timing */
+    aks_timer_config_t timer_config = {
+        .period_us = g_isolation_handle.config.measurement_period * 1000, /* Convert ms to µs */
+        .auto_reload = true,
+        .enable_interrupt = true
+    };
+    
+    result = aks_timer_init(AKS_TIMER_ISOLATION_MEASUREMENT, &timer_config);
+    if (result != AKS_OK) {
+        aks_logger_error("Failed to initialize isolation measurement timer: %d", result);
+        return result;
+    }
+    
+    /* Configure fault detection input */
+    gpio_config.mode = AKS_GPIO_MODE_INPUT;
+    gpio_config.pull = AKS_GPIO_PULL_UP;
+    
+    result = aks_gpio_init(AKS_GPIO_ISOLATION_FAULT_INPUT, &gpio_config);
+    if (result != AKS_OK) {
+        aks_logger_warning("Failed to initialize isolation fault input GPIO: %d", result);
+    }
+    
+    /* Initialize calibration resistors control (if available) */
+    gpio_config.mode = AKS_GPIO_MODE_OUTPUT_PP;
+    gpio_config.pull = AKS_GPIO_PULL_NONE;
+    
+    result = aks_gpio_init(AKS_GPIO_ISOLATION_CAL_1M, &gpio_config);
+    if (result == AKS_OK) {
+        result = aks_gpio_init(AKS_GPIO_ISOLATION_CAL_100K, &gpio_config);
+    }
+    
+    if (result == AKS_OK) {
+        /* Initialize calibration resistors to off */
+        aks_gpio_write(AKS_GPIO_ISOLATION_CAL_1M, false);
+        aks_gpio_write(AKS_GPIO_ISOLATION_CAL_100K, false);
+        aks_logger_info("Isolation calibration resistors initialized");
+    } else {
+        aks_logger_warning("Isolation calibration resistors not available");
+    }
+    
+    /* Initialize status LED */
+    result = aks_gpio_init(AKS_GPIO_ISOLATION_STATUS_LED, &gpio_config);
+    if (result == AKS_OK) {
+        aks_gpio_write(AKS_GPIO_ISOLATION_STATUS_LED, false); /* Start with LED off */
+    }
+    
+    /* Initialize measurement settling timer */
+    timer_config.period_us = 50000; /* 50ms settling time */
+    timer_config.auto_reload = false;
+    timer_config.enable_interrupt = false;
+    
+    result = aks_timer_init(AKS_TIMER_ISOLATION_SETTLING, &timer_config);
+    if (result != AKS_OK) {
+        aks_logger_warning("Failed to initialize isolation settling timer: %d", result);
+    }
+    
+    /* Initialize filter buffers to maximum resistance */
+    for (uint8_t i = 0; i < AKS_ISOLATION_FILTER_SAMPLES; i++) {
+        g_isolation_handle.pos_resistance_buffer[i] = 10000000.0f; /* 10MΩ */
+        g_isolation_handle.neg_resistance_buffer[i] = 10000000.0f; /* 10MΩ */
+    }
+    g_isolation_handle.filter_index = 0;
+    
+    /* Perform initial self-test */
+    result = aks_isolation_self_test();
+    if (result != AKS_OK) {
+        aks_logger_error("Isolation monitoring self-test failed: %d", result);
+        return result;
+    }
+    
+    aks_logger_info("Isolation monitoring hardware initialized successfully");
     
     return AKS_OK;
 }
