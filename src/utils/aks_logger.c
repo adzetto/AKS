@@ -716,7 +716,18 @@ static uint32_t aks_logger_get_timestamp(void)
 {
 #ifdef USE_HAL_DRIVER
     return HAL_GetTick();
+#elif defined(USE_FREERTOS)
+    return xTaskGetTickCount();
+#elif defined(__unix__) || defined(__APPLE__)
+    /* Unix/Linux timestamp for testing */
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    }
+    return 0;
 #else
-    return 0; // Placeholder for testing
+    /* Fallback: simple counter for embedded systems without HAL */
+    static uint32_t counter = 0;
+    return ++counter;
 #endif
 }
