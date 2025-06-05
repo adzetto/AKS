@@ -235,7 +235,24 @@ aks_result_t aks_isolation_task(void)
             /* Activate positive measurement relay */
             aks_isolation_set_measurement_relay(AKS_ISOLATION_MEASURE_POSITIVE, true);
             
-            /* Wait for settling time (simulated) */
+            /* Wait for circuit settling time (real hardware timing) */
+            static uint32_t relay_activation_time = 0;
+            uint32_t current_time = aks_get_system_time();
+            
+            if (relay_activation_time == 0) {
+                relay_activation_time = current_time;
+                /* Return without measurement to allow settling */
+                return AKS_OK;
+            }
+            
+            /* Check if enough settling time has passed */
+            if ((current_time - relay_activation_time) < AKS_ISOLATION_SETTLING_TIME_MS) {
+                /* Still settling, return and wait */
+                return AKS_OK;
+            }
+            
+            /* Reset timing for next measurement */
+            relay_activation_time = 0;
             
             /* Read measurement voltage */
             float voltage = aks_isolation_read_measurement_voltage(AKS_ISOLATION_MEASURE_POSITIVE);
@@ -260,7 +277,24 @@ aks_result_t aks_isolation_task(void)
             /* Activate negative measurement relay */
             aks_isolation_set_measurement_relay(AKS_ISOLATION_MEASURE_NEGATIVE, true);
             
-            /* Wait for settling time (simulated) */
+            /* Wait for circuit settling time (real hardware timing) */
+            static uint32_t neg_relay_activation_time = 0;
+            current_time = aks_get_system_time();
+            
+            if (neg_relay_activation_time == 0) {
+                neg_relay_activation_time = current_time;
+                /* Return without measurement to allow settling */
+                return AKS_OK;
+            }
+            
+            /* Check if enough settling time has passed */
+            if ((current_time - neg_relay_activation_time) < AKS_ISOLATION_SETTLING_TIME_MS) {
+                /* Still settling, return and wait */
+                return AKS_OK;
+            }
+            
+            /* Reset timing for next measurement */
+            neg_relay_activation_time = 0;
             
             /* Read measurement voltage */
             float voltage = aks_isolation_read_measurement_voltage(AKS_ISOLATION_MEASURE_NEGATIVE);
