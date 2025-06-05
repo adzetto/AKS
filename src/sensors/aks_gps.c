@@ -445,9 +445,28 @@ static uint32_t aks_gps_get_time_ms(void)
 {
 #ifdef USE_HAL_DRIVER
     return HAL_GetTick();
+#elif defined(USE_FREERTOS)
+    return xTaskGetTickCount() * portTICK_PERIOD_MS;
+#elif defined(__unix__) || defined(__APPLE__)
+    /* Unix/Linux timestamp for testing */
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    }
+    return 0;
 #else
-    static uint32_t fake_time = 0;
-    return ++fake_time; /* For testing */
+    /* Real-time counter for embedded systems without HAL */
+    static uint32_t system_time_ms = 0;
+    static uint32_t last_call_time = 0;
+    
+    /* Simple increment based on assumed 1ms tick */
+    uint32_t current_systick = aks_core_get_tick();
+    if (current_systick != last_call_time) {
+        system_time_ms += (current_systick - last_call_time);
+        last_call_time = current_systick;
+    }
+    
+    return system_time_ms;
 #endif
 }
 
