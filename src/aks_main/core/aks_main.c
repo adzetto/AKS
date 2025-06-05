@@ -207,12 +207,14 @@ aks_result_t aks_main_task(void)
     }
     
     /* Run security monitoring */
-    /* TODO: Security monitoring temporarily disabled
+    #ifdef AKS_ENABLE_SECURITY_MONITORING
     result = aks_security_task();
     if (result != AKS_OK) {
+        /* Security violation detected - immediate emergency stop */
+        aks_main_emergency_stop(AKS_FAULT_SECURITY_VIOLATION);
         handle_system_fault(AKS_FAULT_SECURITY_VIOLATION);
     }
-    */
+    #endif /* AKS_ENABLE_SECURITY_MONITORING */
     
     /* Send heartbeat every second */
     if ((current_time - last_heartbeat_time) >= 1000) {

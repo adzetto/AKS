@@ -414,16 +414,39 @@ static aks_result_t aks_system_startup_sequence(void)
             break;
             
         case 5:
-            /* Initialize isolation monitoring */
-            // Note: This would need actual ADC handle in real implementation
-            // aks_isolation_init(NULL, &hadc1, ADC_CHANNEL_4, ADC_CHANNEL_5);
+            /* Initialize isolation monitoring with real ADC configuration */
+            {
+                aks_isolation_config_t iso_config = {
+                    .min_resistance = 50000.0f,        /* 50kΩ minimum */
+                    .warning_level = 200000.0f,        /* 200kΩ warning */
+                    .good_level = 1000000.0f,          /* 1MΩ good */
+                    .measurement_voltage = 12.0f,       /* 12V measurement */
+                    .filter_samples = 8,               /* 8-sample filter */
+                    .measurement_period = 500,         /* 500ms period */
+                    .fault_threshold = 3,              /* 3 consecutive faults */
+                    .enable_positive_monitoring = true,
+                    .enable_negative_monitoring = true,
+                    .enable_auto_measurement = true
+                };
+                aks_isolation_init(&iso_config);
+            }
             startup_phase++;
             break;
             
         case 6:
-            /* Initialize ADC */
-            // Note: This would need actual ADC handle in real implementation
-            // aks_adc_init(&hadc1);
+            /* Initialize ADC with all required channels */
+            {
+                aks_adc_config_t adc_config = {
+                    .resolution = 12,                  /* 12-bit resolution */
+                    .sampling_time = 15,               /* 15 cycles sampling */
+                    .oversampling = 4,                 /* 4x oversampling */
+                    .enable_dma = true,                /* Enable DMA */
+                    .enable_interrupts = true,         /* Enable interrupts */
+                    .reference_voltage = 3.3f,         /* 3.3V reference */
+                    .num_channels = 16                 /* 16 channels */
+                };
+                aks_adc_init(&adc_config);
+            }
             startup_phase++;
             break;
             
